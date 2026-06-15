@@ -1,0 +1,12 @@
+venv/
+hospital/
+.env
+__pycache__/
+*.pyc
+*.pkl
+mlruns/
+mlflow.db
+data/raw/
+node_modules/
+frontend/build/
+*.log
