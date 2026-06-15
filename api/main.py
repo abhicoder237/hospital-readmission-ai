@@ -263,6 +263,14 @@ async def root():
     }
 
 
+@app.on_event("startup")
+async def startup_event():
+    try:
+        ModelManager.load()
+    except Exception as e:
+        logger.error(f"Startup error: {e}")
+        # Server start hoga — model load baad mein retry hoga
+
 @app.get("/health")
 async def health_check():
     """Model loaded hai ya nahi check karta hai."""
