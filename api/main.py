@@ -2,7 +2,11 @@
 
 import os
 import sys
-sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+
+# ── Path fix — Render pe zaroori hai ─────────────────────────
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, BASE_DIR)
+os.chdir(BASE_DIR)  # Working directory = project root
 
 import numpy as np
 import pandas as pd
@@ -15,15 +19,17 @@ from typing import Optional
 import logging
 from datetime import datetime
 
+
 # ============================================
 # LOGGING SETUP
 # ============================================
+os.makedirs('api', exist_ok=True)
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s | %(levelname)s | %(message)s',
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler('api/api.log')
     ]
 )
 logger = logging.getLogger(__name__)
@@ -37,54 +43,64 @@ app = FastAPI(
     description="""
     AI-powered 30-day readmission risk prediction.
 
-    ## Features
-    * Predict readmission risk for a patient
-    * Get SHAP-based explanation of prediction
-    * Health check endpoint
+    ## Endpoints
+    * **POST /predict** — Predict readmission risk
+    * **GET /health**   — Health check
+    * **GET /model-info** — Model details
     """,
     version="1.0.0",
 )
 
-# CORS — Frontend se connect karne ke liye
+# CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],   # Production mein specific domain do
+    allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 
 # ============================================
-# MODEL LOADING — Startup pe ek baar load hoga
+# MODEL MANAGER
 # ============================================
 class ModelManager:
-    """
-    Model ko memory mein rakhta hai.
-    Har request pe dobara load nahi karna —
-    warna slow ho jaata.
-    """
     model        = None
     explainer    = None
     feature_cols = None
     scaler       = None
+    loaded       = False
 
     @classmethod
     def load(cls):
         try:
             logger.info("Loading model artifacts...")
-            cls.model        = joblib.load('models/readmission_model.pkl')
-            cls.feature_cols = joblib.load('models/feature_cols.pkl')
-            cls.scaler       = joblib.load('models/scaler.pkl')
+
+            # Model paths — BASE_DIR se relative
+            model_path   = os.path.join(BASE_DIR, 'models', 'readmission_model.pkl')
+            scaler_path  = os.path.join(BASE_DIR, 'models', 'scaler.pkl')
+            feature_path = os.path.join(BASE_DIR, 'models', 'feature_cols.pkl')
+
+            logger.info(f"Looking for model at: {model_path}")
+            logger.info(f"File exists: {os.path.exists(model_path)}")
+
+            cls.model        = joblib.load(model_path)
+            cls.feature_cols = joblib.load(feature_path)
+            cls.scaler       = joblib.load(scaler_path)
             cls.explainer    = shap.TreeExplainer(cls.model)
+            cls.loaded       = True
+
             logger.info("✅ All artifacts loaded successfully")
+            logger.info(f"   Features: {len(cls.feature_cols)}")
+
         except Exception as e:
             logger.error(f"❌ Model loading failed: {e}")
-            raise
+            logger.error(f"   BASE_DIR: {BASE_DIR}")
+            logger.error(f"   Files in models/: {os.listdir(os.path.join(BASE_DIR, 'models')) if os.path.exists(os.path.join(BASE_DIR, 'models')) else 'folder not found'}")
+            cls.loaded = False
 
 
 @app.on_event("startup")
 async def startup_event():
-    """Server start hote hi model load karo."""
     ModelManager.load()
 
 
@@ -92,53 +108,34 @@ async def startup_event():
 # REQUEST / RESPONSE MODELS
 # ============================================
 class PatientFeatures(BaseModel):
-    """
-    Patient ka data — doctor yeh fill karega UI mein.
-    Field(...) = required field
-    ge/le = greater/less than validation
-    """
-    # Patient info
-    age:                  float = Field(..., ge=18,  le=95,
-                                        description="Patient age")
-    gender_male:          int   = Field(..., ge=0,   le=1,
-                                        description="1=Male, 0=Female")
+    age:                  float = Field(..., ge=18,  le=95)
+    gender_male:          int   = Field(..., ge=0,   le=1)
+    insurance_medicare:   int   = Field(0,   ge=0,   le=1)
+    insurance_medicaid:   int   = Field(0,   ge=0,   le=1)
+    insurance_selfpay:    int   = Field(0,   ge=0,   le=1)
+    length_of_stay:       float = Field(..., ge=0,   le=30)
+    emergency_admission:  int   = Field(0,   ge=0,   le=1)
+    urgent_admission:     int   = Field(0,   ge=0,   le=1)
+    discharged_home:      int   = Field(0,   ge=0,   le=1)
+    discharged_snf:       int   = Field(0,   ge=0,   le=1)
+    n_diagnoses:          int   = Field(..., ge=0,   le=20)
+    has_diabetes:         int   = Field(0,   ge=0,   le=1)
+    has_heart_failure:    int   = Field(0,   ge=0,   le=1)
+    has_copd:             int   = Field(0,   ge=0,   le=1)
+    has_kidney_disease:   int   = Field(0,   ge=0,   le=1)
+    has_sepsis:           int   = Field(0,   ge=0,   le=1)
+    avg_glucose:          float = Field(100.0, ge=40, le=400)
+    max_creatinine:       float = Field(1.0,  ge=0.3, le=15)
+    min_hemoglobin:       float = Field(12.0, ge=3,   le=20)
+    avg_sodium:           float = Field(140.0,ge=120, le=160)
+    n_abnormal_labs:      int   = Field(0,   ge=0,   le=20)
+    n_labs:               int   = Field(0,   ge=0,   le=30)
+    n_medications:        int   = Field(0,   ge=0,   le=20)
+    has_insulin:          int   = Field(0,   ge=0,   le=1)
+    has_iv_drugs:         int   = Field(0,   ge=0,   le=1)
+    n_prev_admissions:    int   = Field(0,   ge=0,   le=20)
 
-    # Insurance
-    insurance_medicare:   int   = Field(0, ge=0, le=1)
-    insurance_medicaid:   int   = Field(0, ge=0, le=1)
-    insurance_selfpay:    int   = Field(0, ge=0, le=1)
-
-    # Admission
-    length_of_stay:       float = Field(..., ge=0,   le=30,
-                                        description="Days in hospital")
-    emergency_admission:  int   = Field(0, ge=0, le=1)
-    urgent_admission:     int   = Field(0, ge=0, le=1)
-    discharged_home:      int   = Field(0, ge=0, le=1)
-    discharged_snf:       int   = Field(0, ge=0, le=1)
-
-    # Diagnoses
-    n_diagnoses:          int   = Field(..., ge=0, le=20)
-    has_diabetes:         int   = Field(0, ge=0, le=1)
-    has_heart_failure:    int   = Field(0, ge=0, le=1)
-    has_copd:             int   = Field(0, ge=0, le=1)
-    has_kidney_disease:   int   = Field(0, ge=0, le=1)
-    has_sepsis:           int   = Field(0, ge=0, le=1)
-
-    # Labs
-    avg_glucose:          float = Field(100.0, ge=40,  le=400)
-    max_creatinine:       float = Field(1.0,   ge=0.3, le=15)
-    min_hemoglobin:       float = Field(12.0,  ge=3,   le=20)
-    avg_sodium:           float = Field(140.0, ge=120, le=160)
-    n_abnormal_labs:      int   = Field(0,     ge=0,   le=20)
-    n_labs:               int   = Field(0,     ge=0,   le=30)
-
-    # Medications
-    n_medications:        int   = Field(0, ge=0, le=20)
-    has_insulin:          int   = Field(0, ge=0, le=1)
-    has_iv_drugs:         int   = Field(0, ge=0, le=1)
-
-    # History
-    n_prev_admissions:    int   = Field(0, ge=0, le=20)
+    model_config = {'protected_namespaces': ()}
 
     class Config:
         json_schema_extra = {
@@ -180,7 +177,8 @@ class RiskFactor(BaseModel):
 
 
 class PredictionResponse(BaseModel):
-    """API ka response — frontend ko yeh milega."""
+    model_config = {'protected_namespaces': ()}
+
     patient_id:       Optional[str]
     risk_score:       float
     risk_percentage:  str
@@ -194,20 +192,18 @@ class PredictionResponse(BaseModel):
 
 
 # ============================================
-# HELPER FUNCTIONS
+# HELPERS
 # ============================================
 def get_risk_level(prob: float):
-    """Risk level aur color determine karta hai."""
     if prob >= 0.60:
         return "HIGH",   "#e74c3c", "🔴"
     elif prob >= 0.35:
-        return "MEDIUM", "#f39c12", "🟡"
+        return "MEDIUM", "#f59e0b", "🟡"
     else:
         return "LOW",    "#2ecc71", "🟢"
 
 
-def get_recommendation(risk_level: str, top_factors: list):
-    """Risk level se clinical recommendation."""
+def get_recommendation(risk_level: str):
     if risk_level == "HIGH":
         return (
             "⚠️ HIGH RISK: Schedule follow-up within 7 days. "
@@ -228,14 +224,10 @@ def get_recommendation(risk_level: str, top_factors: list):
 
 
 def prepare_features(patient: PatientFeatures) -> pd.DataFrame:
-    """Patient data ko model-ready format mein convert karta hai."""
     feature_dict = patient.model_dump()
     df = pd.DataFrame([feature_dict])
-
-    # Feature order same rakho jaise training mein tha
     df = df[ModelManager.feature_cols]
 
-    # Numerical columns scale karo
     num_cols = [
         'age', 'length_of_stay', 'avg_glucose',
         'max_creatinine', 'min_hemoglobin', 'avg_sodium',
@@ -251,64 +243,55 @@ def prepare_features(patient: PatientFeatures) -> pd.DataFrame:
 # ============================================
 # ENDPOINTS
 # ============================================
-
 @app.get("/")
 async def root():
-    """API root — health check."""
     return {
-        "message": "Hospital Readmission Risk API",
-        "version": "1.0.0",
-        "status":  "running",
-        "docs":    "/docs"
+        "message":      "Hospital Readmission Risk API 🏥",
+        "version":      "1.0.0",
+        "status":       "running",
+        "model_loaded": ModelManager.loaded,
+        "docs":         "/docs"
     }
 
 
-@app.on_event("startup")
-async def startup_event():
-    try:
-        ModelManager.load()
-    except Exception as e:
-        logger.error(f"Startup error: {e}")
-        # Server start hoga — model load baad mein retry hoga
-
 @app.get("/health")
 async def health_check():
-    """Model loaded hai ya nahi check karta hai."""
-    model_loaded = ModelManager.model is not None
     return {
-        "status":       "healthy" if model_loaded else "unhealthy",
-        "model_loaded": model_loaded,
-        "timestamp":    datetime.now().isoformat()
+        "status":       "healthy" if ModelManager.loaded else "degraded",
+        "model_loaded": ModelManager.loaded,
+        "timestamp":    datetime.now().isoformat(),
+        "base_dir":     BASE_DIR,
     }
 
 
 @app.post("/predict", response_model=PredictionResponse)
 async def predict_readmission(patient: PatientFeatures):
-    """
-    Main prediction endpoint.
+    # Model loaded nahi hai toh retry karo
+    if not ModelManager.loaded:
+        logger.warning("Model not loaded — retrying...")
+        ModelManager.load()
 
-    Input  : Patient features
-    Output : Risk score + explanation + recommendation
-    """
+    if not ModelManager.loaded:
+        raise HTTPException(
+            status_code=503,
+            detail="Model not available. Please try again in a moment."
+        )
+
     try:
-        logger.info(f"Prediction request received")
+        logger.info("Prediction request received")
 
-        # Features prepare karo
         X = prepare_features(patient)
 
-        # Risk score
         risk_prob = float(
             ModelManager.model.predict_proba(X)[0][1]
         )
 
-        # SHAP explanation
-        shap_vals    = ModelManager.explainer.shap_values(X)[0]
+        shap_vals      = ModelManager.explainer.shap_values(X)[0]
         feature_impact = pd.Series(
             shap_vals,
             index=ModelManager.feature_cols
         ).sort_values(key=abs, ascending=False)
 
-        # Top 5 factors
         top_factors = []
         for feat, impact in feature_impact.head(5).items():
             top_factors.append(RiskFactor(
@@ -319,15 +302,12 @@ async def predict_readmission(patient: PatientFeatures):
                              else "Decreases Risk")
             ))
 
-        # Risk level
         risk_level, color, emoji = get_risk_level(risk_prob)
+        recommendation = get_recommendation(risk_level)
 
-        # Recommendation
-        recommendation = get_recommendation(
-            risk_level, top_factors
-        )
+        logger.info(f"Prediction done: {risk_level} | {risk_prob:.3f}")
 
-        response = PredictionResponse(
+        return PredictionResponse(
             patient_id       = None,
             risk_score       = round(risk_prob, 4),
             risk_percentage  = f"{risk_prob * 100:.1f}%",
@@ -343,12 +323,6 @@ async def predict_readmission(patient: PatientFeatures):
             model_version    = "v1.0.0-xgboost"
         )
 
-        logger.info(
-            f"Prediction: {risk_level} | "
-            f"Score: {risk_prob:.3f}"
-        )
-        return response
-
     except Exception as e:
         logger.error(f"Prediction error: {e}")
         raise HTTPException(
@@ -359,12 +333,16 @@ async def predict_readmission(patient: PatientFeatures):
 
 @app.get("/model-info")
 async def model_info():
-    """Model ki information return karta hai."""
+    if not ModelManager.loaded:
+        raise HTTPException(status_code=503, detail="Model not loaded")
+
     return {
-        "model_type":    "XGBoost Classifier",
-        "features":      ModelManager.feature_cols,
-        "n_features":    len(ModelManager.feature_cols),
-        "version":       "1.0.0",
-        "trained_on":    "Synthetic hospital data",
-        "target":        "30-day readmission",
+        "model_type":  "XGBoost Classifier",
+        "features":    ModelManager.feature_cols,
+        "n_features":  len(ModelManager.feature_cols),
+        "version":     "1.0.0",
+        "trained_on":  "Synthetic hospital data",
+        "target":      "30-day readmission",
+        "recall":      "73.2%",
+        "roc_auc":     "62.8%",
     }
